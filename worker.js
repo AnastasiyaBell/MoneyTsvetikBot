@@ -284,6 +284,17 @@ function buildTwoColumnKeyboard(items) {
 
 // ===== CALLBACK =====
 async function handleCallback(callback, env) {
+  const callbackId = callback.id;
+
+  // 👇 ЭТО ОБЯЗАТЕЛЬНО
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callback_query_id: callbackId
+    })
+  });
+
   const data = callback.data;
   const chatId = callback.message.chat.id;
 
@@ -319,7 +330,7 @@ async function handleCallback(callback, env) {
 
     await env.KV.put(`acc_${chatId}`, account);
 
-    await sendMessage(env, chatId, `Счет: ${account}\nТеперь введи сумму и описание`);
+    await sendMessage(env, chatId, `Счет: ${account}\nТеперь введи сумму и описание, например: 5 реве\nВНИМАНИЕ: в другой валюте добавь буквы к сумме - 500руб пирожное, 20лир автобус`);
     return;
   }
 
@@ -458,9 +469,9 @@ function parseMessage(text) {
 
   let currency = "€";
 
-  if (rawAmount.includes("р")) {
+  if (rawAmount.includes("руб")) {
     currency = "₽";
-    rawAmount = rawAmount.replace("р", "");
+    rawAmount = rawAmount.replace("руб", "");
   } else if (rawAmount.includes("лир")) {
     currency = "₺";
     rawAmount = rawAmount.replace("лир", "");
