@@ -13,6 +13,7 @@ const USERS = {
   344832427: "Koti"     // 👈 мужа
 };
 
+
 export default {
   async fetch(request, env) {
     if (request.method !== "POST") return new Response("OK");
