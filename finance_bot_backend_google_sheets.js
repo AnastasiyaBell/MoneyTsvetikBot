@@ -7,6 +7,7 @@ function doPost(e) {
     const year = new Date().getFullYear();
     const sheetName = "Data" + year;
 
+
     let sheet = ss.getSheetByName(sheetName);
 
     if (!sheet) {
