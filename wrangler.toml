@@ -1,4 +1,4 @@
-name = "money-tsvetik-bot"
+name = "money-tsvetik-bot-2"
 main = "worker.js"
 compatibility_date = "2026-05-27"
 
