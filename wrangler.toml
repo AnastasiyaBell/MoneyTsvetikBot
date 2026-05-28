@@ -7,3 +7,7 @@ enabled = true
 
 [observability.logs]
 invocation_logs = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "056a2e87fb4045cc872139f8ead67058"
