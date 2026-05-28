@@ -134,24 +134,27 @@ function doGet(e) {
   if (e.parameter.getLast) {
     const user = e.parameter.getLast;
 
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
-    const data = sheet.getDataRange().getValues();
+    const sheets = getDataSheetsNewestFirst();
 
-    for (let i = data.length - 1; i > 0; i--) {
-      const rowUser = data[i][8]; // User
+    for (const sheet of sheets) {
+      const data = sheet.getDataRange().getValues();
 
-      if (rowUser.toString().trim() === user.toString().trim()) {
-        return ContentService
-          .createTextOutput(JSON.stringify({
-            status: "found",
-            amount: data[i][2],
-            currency: data[i][3],
-            category: data[i][5],
-            description: data[i][6],
-            account: data[i][7],
-            date: data[i][0]
-          }))
-          .setMimeType(ContentService.MimeType.JSON);
+      for (let i = data.length - 1; i > 0; i--) {
+        const rowUser = data[i][8]; // User
+
+        if (rowUser.toString().trim() === user.toString().trim()) {
+          return ContentService
+            .createTextOutput(JSON.stringify({
+              status: "found",
+              amount: data[i][2],
+              currency: data[i][3],
+              category: data[i][5],
+              description: data[i][6],
+              account: data[i][7],
+              date: data[i][0]
+            }))
+            .setMimeType(ContentService.MimeType.JSON);
+        }
       }
     }
 
@@ -163,36 +166,39 @@ function doGet(e) {
   if (e.parameter.deleteLast) {
     const user = e.parameter.deleteLast;
 
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
-    const data = sheet.getDataRange().getValues();
+    const sheets = getDataSheetsNewestFirst();
 
-    for (let i = data.length - 1; i > 0; i--) {
-      const rowUser = data[i][8]; // User
-      const date = new Date(data[i][0]); // Date
+    for (const sheet of sheets) {
+      const data = sheet.getDataRange().getValues();
 
-      if (rowUser.toString().trim() === user.toString().trim()) {
-        const diff = Date.now() - date.getTime();
+      for (let i = data.length - 1; i > 0; i--) {
+        const rowUser = data[i][8]; // User
+        const date = new Date(data[i][0]); // Date
 
-        if (diff <= 86400000) {
-          const deletedRow = data[i];
+        if (rowUser.toString().trim() === user.toString().trim()) {
+          const diff = Date.now() - date.getTime();
 
-          sheet.deleteRow(i + 1);
+          if (diff <= 86400000) {
+            const deletedRow = data[i];
 
-          return ContentService
-            .createTextOutput(JSON.stringify({
-              status: "deleted",
-              amount: deletedRow[2],
-              currency: deletedRow[3],
-              category: deletedRow[5],
-              description: deletedRow[6],
-              account: deletedRow[7]
-            }))
-            .setMimeType(ContentService.MimeType.JSON);
+            sheet.deleteRow(i + 1);
 
-        } else {
-          return ContentService
-            .createTextOutput(JSON.stringify({ status: "too_late" }))
-            .setMimeType(ContentService.MimeType.JSON);
+            return ContentService
+              .createTextOutput(JSON.stringify({
+                status: "deleted",
+                amount: deletedRow[2],
+                currency: deletedRow[3],
+                category: deletedRow[5],
+                description: deletedRow[6],
+                account: deletedRow[7]
+              }))
+              .setMimeType(ContentService.MimeType.JSON);
+
+          } else {
+            return ContentService
+              .createTextOutput(JSON.stringify({ status: "too_late" }))
+              .setMimeType(ContentService.MimeType.JSON);
+          }
         }
       }
     }
@@ -202,13 +208,67 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheets().pop(); // последний год
-
-  const data = sheet.getDataRange().getValues();
+  const data = getAllDataRows();
 
   return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
 
+}
+
+function getAllDataRows() {
+  const sheets = getDataSheetsOldestFirst();
+
+  if (sheets.length === 0) {
+    return [[
+      "Date",
+      "Type",
+      "Amount",
+      "Currency",
+      "Amount_EUR",
+      "Category",
+      "Description",
+      "Account",
+      "User"
+    ]];
+  }
+
+  const rows = [];
+
+  sheets.forEach((sheet, index) => {
+    const data = sheet.getDataRange().getValues();
+
+    if (data.length === 0) return;
+
+    if (index === 0) {
+      rows.push(data[0]);
+    }
+
+    rows.push(...data.slice(1));
+  });
+
+  return rows;
+}
+
+function getDataSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = "Data" + new Date().getFullYear();
+  const sheet = ss.getSheetByName(sheetName);
+
+  if (!sheet) {
+    throw new Error("Sheet not found: " + sheetName);
+  }
+
+  return sheet;
+}
+
+function getDataSheetsOldestFirst() {
+  return SpreadsheetApp.getActiveSpreadsheet()
+    .getSheets()
+    .filter(sheet => /^Data\d{4}$/.test(sheet.getName()))
+    .sort((a, b) => a.getName().localeCompare(b.getName()));
+}
+
+function getDataSheetsNewestFirst() {
+  return getDataSheetsOldestFirst().reverse();
 }
