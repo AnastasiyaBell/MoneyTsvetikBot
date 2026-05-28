@@ -16,26 +16,58 @@ const USERS = {
 
 export default {
   async fetch(request, env) {
-    if (request.method !== "POST") return new Response("OK");
+    try {
+      return await handleRequest(request, env);
+    } catch (error) {
+      console.error("request:error", {
+        message: error?.message,
+        stack: error?.stack,
+        hasTelegramToken: Boolean(env.TELEGRAM_TOKEN),
+        hasSheetUrl: Boolean(env.SHEET_URL),
+        hasKv: Boolean(env.KV)
+      });
 
-    const data = await request.json();
-
-    // ===== CALLBACK =====
-    if (data.callback_query) {
-      await handleCallback(data.callback_query, env);
       return new Response("ok");
     }
+  }
+};
 
-    if (!data.message) return new Response("ok");
+async function handleRequest(request, env) {
+  if (request.method !== "POST") {
+    const url = new URL(request.url);
 
-    const chatId = data.message?.chat?.id || data.callback_query?.message?.chat?.id;
-    const text = data.message.text;
-    const userName = USERS[chatId] || "Unknown";
-
-    if (!USERS[chatId]) {
-      await sendMessage(env, chatId, "⛔ У тебя нет доступа");
-      return new Response("ok");
+    if (url.searchParams.get("health") === "1") {
+      return Response.json({
+        ok: true,
+        hasTelegramToken: Boolean(env.TELEGRAM_TOKEN),
+        hasSheetUrl: Boolean(env.SHEET_URL),
+        hasKv: Boolean(env.KV)
+      });
     }
+
+    return new Response("OK");
+  }
+
+  const data = await request.json();
+
+  console.log("telegram:update", getUpdateLogInfo(data));
+
+  // ===== CALLBACK =====
+  if (data.callback_query) {
+    await handleCallback(data.callback_query, env);
+    return new Response("ok");
+  }
+
+  if (!data.message) return new Response("ok");
+
+  const chatId = data.message?.chat?.id || data.callback_query?.message?.chat?.id;
+  const text = data.message.text;
+  const userName = USERS[chatId] || "Unknown";
+
+  if (!USERS[chatId]) {
+    await sendMessage(env, chatId, "⛔ У тебя нет доступа");
+    return new Response("ok");
+  }
 
     // ===== ГЛАВНОЕ МЕНЮ =====
     if (text === "/start") {
@@ -185,26 +217,52 @@ export default {
         `💸 ${userName}: ${parsed.amount}${parsed.currency}\n${selectedCategory} | ${selectedAccount}`);
     }
 
-    return new Response("ok");
+  return new Response("ok");
+}
+
+function getUpdateLogInfo(data) {
+  if (data.callback_query) {
+    return {
+      kind: "callback",
+      data: data.callback_query.data,
+      knownUser: Boolean(USERS[data.callback_query.message?.chat?.id])
+    };
   }
-};
+
+  if (data.message) {
+    const text = data.message.text;
+    const menuCommands = new Set([
+      "/start",
+      "🧾 Транзакция",
+      "📊 Аналитика",
+      "📄 Открыть таблицу",
+      "🗑 Удалить категорию",
+      "🔔 Уведомления",
+      "❌ Отменить мою последнюю транзакцию"
+    ]);
+
+    return {
+      kind: "message",
+      text: menuCommands.has(text) ? text : "user_input",
+      knownUser: Boolean(USERS[data.message.chat?.id])
+    };
+  }
+
+  return { kind: "other" };
+}
 
 async function sendMainMenu(env, chatId, text = "Выбери действие:") {
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      reply_markup: {
-        keyboard: [
-          ["🧾 Транзакция", "📊 Аналитика"],
-          ["📄 Открыть таблицу", "🗑 Удалить категорию"], 
-          ["🔔 Уведомления", "❌ Отменить мою последнюю транзакцию"]
-        ],
-        resize_keyboard: true
-      }
-    })
+  await callTelegram(env, "sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup: {
+      keyboard: [
+        ["🧾 Транзакция", "📊 Аналитика"],
+        ["📄 Открыть таблицу", "🗑 Удалить категорию"],
+        ["🔔 Уведомления", "❌ Отменить мою последнюю транзакцию"]
+      ],
+      resize_keyboard: true
+    }
   });
 }
 
@@ -288,12 +346,8 @@ async function handleCallback(callback, env) {
   const callbackId = callback.id;
 
   // 👇 ЭТО ОБЯЗАТЕЛЬНО
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/answerCallbackQuery`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      callback_query_id: callbackId
-    })
+  await callTelegram(env, "answerCallbackQuery", {
+    callback_query_id: callbackId
   });
 
   const data = callback.data;
@@ -502,35 +556,54 @@ async function saveToSheet(env, data) {
 
 // ===== TELEGRAM =====
 async function sendMessage(env, chatId, text) {
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      reply_markup: {
-        keyboard: [
-          ["🧾 Транзакция", "📊 Аналитика"],
-          ["📄 Открыть таблицу", "🗑 Удалить категорию"], 
-          ["🔔 Уведомления", "❌ Отменить мою последнюю транзакцию"]
-        ],
-        resize_keyboard: true
-      }
-    })
+  await callTelegram(env, "sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup: {
+      keyboard: [
+        ["🧾 Транзакция", "📊 Аналитика"],
+        ["📄 Открыть таблицу", "🗑 Удалить категорию"],
+        ["🔔 Уведомления", "❌ Отменить мою последнюю транзакцию"]
+      ],
+      resize_keyboard: true
+    }
   });
 }
-// ===== Menu constant =====
-async function sendInlineKeyboard(env, chatId, text, keyboard) {
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
+
+async function callTelegram(env, method, payload) {
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      reply_markup: {
-        inline_keyboard: keyboard
-      }
-    })
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    let body = "";
+
+    try {
+      body = await res.text();
+    } catch (error) {
+      body = error?.message || "could not read response";
+    }
+
+    console.error("telegram:api_error", {
+      method,
+      status: res.status,
+      body: body.slice(0, 500)
+    });
+  }
+
+  return res;
+}
+
+// ===== Menu constant =====
+async function sendInlineKeyboard(env, chatId, text, keyboard) {
+  await callTelegram(env, "sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup: {
+      inline_keyboard: keyboard
+    }
   });
 }
 
@@ -620,13 +693,9 @@ async function sendChart(env, chatId, labels, values, title) {
 
   await sendMessage(env, chatId, `Всего: €${values.reduce((a,b)=>a+b,0).toFixed(2)}`);
 
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendPhoto`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      photo: url
-    })
+  await callTelegram(env, "sendPhoto", {
+    chat_id: chatId,
+    photo: url
   });
 }
 
