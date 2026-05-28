@@ -565,6 +565,11 @@ function generateColors(n) {
 }
 
 async function sendChart(env, chatId, labels, values, title) {
+  if (values.length === 0) {
+    await sendMessage(env, chatId, "Нет данных за выбранный период");
+    return;
+  }
+
   const colors = generateColors(values.length);
 
   const chartConfig = {
@@ -629,17 +634,36 @@ async function getAnalytics(env, days, type) {
   const res = await fetch(env.SHEET_URL);
   const rows = await res.json();
 
+  console.log("analytics:loaded", {
+    days,
+    type,
+    rows: Array.isArray(rows) ? rows.length : 0
+  });
+
+  if (!Array.isArray(rows)) {
+    console.log("analytics:invalid_response");
+    return { labels: [], values: [] };
+  }
+
   const now = Date.now();
   const filtered = rows.slice(1).filter(r => {
     const date = new Date(r[0]).getTime();
-    return (now - date) <= days * 86400000 && r[1] === type;
+    return Number.isFinite(date) && (now - date) <= days * 86400000 && r[1] === type;
+  });
+
+  console.log("analytics:filtered", {
+    days,
+    type,
+    rows: filtered.length
   });
 
   const map = {};
 
   filtered.forEach(r => {
     const category = r[5];
-    const amount = r[4]; // Amount_EUR
+    const amount = Number(r[4]); // Amount_EUR
+
+    if (!category || !Number.isFinite(amount)) return;
 
     map[category] = (map[category] || 0) + amount;
   });
