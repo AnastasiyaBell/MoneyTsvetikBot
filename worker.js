@@ -668,7 +668,7 @@ async function sendChart(env, chatId, labels, values, title) {
         datalabels: {
           anchor: "end",
           align: "center",
-          formatter: (value) => value + " €"
+          formatter: "__AMOUNT_FORMATTER__"
         }
       },
       scales: {
@@ -688,8 +688,13 @@ async function sendChart(env, chatId, labels, values, title) {
     }
   };
 
+  // QuickChart needs executable formatter code; JSON.stringify drops functions.
+  const chartString = JSON.stringify(chartConfig).replace(
+    '"formatter":"__AMOUNT_FORMATTER__"',
+    '"formatter":function(value) { return Number(value).toFixed(1) + " €"; }'
+  );
   const url = "https://quickchart.io/chart?c=" +
-    encodeURIComponent(JSON.stringify(chartConfig));
+    encodeURIComponent(chartString);
 
   await sendMessage(env, chatId, `Всего: €${values.reduce((a,b)=>a+b,0).toFixed(2)}`);
 
