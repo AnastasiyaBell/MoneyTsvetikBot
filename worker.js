@@ -691,7 +691,7 @@ async function sendChart(env, chatId, labels, values, title) {
   // QuickChart needs executable formatter code; JSON.stringify drops functions.
   const chartString = JSON.stringify(chartConfig).replace(
     '"formatter":"__AMOUNT_FORMATTER__"',
-    '"formatter":function(value) { return Number(value).toFixed(1) + " €"; }'
+    '"formatter":function(value) { return Number(value).toFixed(0); }'
   );
   const url = "https://quickchart.io/chart?c=" +
     encodeURIComponent(chartString);
