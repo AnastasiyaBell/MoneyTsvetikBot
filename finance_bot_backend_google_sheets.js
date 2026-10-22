@@ -42,11 +42,9 @@ function doPost(e) {
 
     const lastRow = sheet.getLastRow();
 
-    // если доход → красим строку
-    if (data.type === "income") {
-      sheet.getRange(lastRow, 1, 1, 9) // 8 колонок
-        .setBackground("#d9f2d9"); // светло-зелёный
-    }
+    // Доходы выделяем зелёным, у расходов сбрасываем унаследованную заливку.
+    sheet.getRange(lastRow, 1, 1, 9)
+      .setBackground(data.type === "income" ? "#d9f2d9" : null);
 
     return ContentService.createTextOutput("ok");
 
@@ -95,6 +93,7 @@ function convertToEUR(amount, currency) {
 
     if (currency === "₽") from = "RUB";
     if (currency === "₺") from = "TRY";
+    if (currency === "$") from = "USD";
 
     if (!from) return amount;
 

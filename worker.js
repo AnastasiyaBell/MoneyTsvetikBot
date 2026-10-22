@@ -385,7 +385,7 @@ async function handleCallback(callback, env) {
 
     await env.KV.put(`acc_${chatId}`, account);
 
-    await sendMessage(env, chatId, `Счет: ${account}\nТеперь введи сумму и описание, например: 5 реве\nВНИМАНИЕ: в другой валюте добавь буквы к сумме - 500руб пирожное, 20лир автобус`);
+    await sendMessage(env, chatId, `Счет: ${account}\nТеперь введи сумму и описание, например: 5 реве\nВНИМАНИЕ: в другой валюте добавь буквы к сумме - 500руб пирожное, 20лир автобус, 25дол кафе`);
     return;
   }
 
@@ -530,6 +530,9 @@ function parseMessage(text) {
   } else if (rawAmount.includes("лир")) {
     currency = "₺";
     rawAmount = rawAmount.replace("лир", "");
+  } else if (rawAmount.includes("дол")) {
+    currency = "$";
+    rawAmount = rawAmount.replace("дол", "");
   } else if (rawAmount.includes("€")) {
     currency = "€";
     rawAmount = rawAmount.replace("€", "");

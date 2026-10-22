@@ -12,7 +12,7 @@ The bot's current interface is in Russian. This guide is in English and includes
 
 - Record expenses and income with an amount and an optional description.
 - Choose a category and an account using Telegram buttons; add custom categories and accounts.
-- Record euros, Russian rubles, and Turkish lira, with an EUR equivalent calculated by the Google Sheets backend.
+- Record euros, Russian rubles, Turkish lira, and US dollars, with an EUR equivalent calculated by the Google Sheets backend.
 - View category totals and bar charts for the last 7, 30, or 365 days, separately for expenses and income.
 - Notify other configured users when a transaction is recorded. Notifications are enabled by default and can be toggled individually.
 - Preview and delete your most recent transaction within 24 hours of its creation.
@@ -38,7 +38,7 @@ Worker replies in Telegram; chart images are requested through QuickChart
 
 Telegram delivers updates to the Worker's HTTPS webhook. The Worker handles menus, parses transaction text, and sends transaction data to a Google Apps Script web app. The script appends a timestamped row to the current year's sheet and highlights income rows in green.
 
-For rubles and lira, the backend uses `GOOGLEFINANCE` in a helper tab named `Rates` and caches exchange rates for up to six hours. The converted value is stored when the transaction is recorded; existing rows are not automatically revalued.
+For rubles, lira, and US dollars, the backend uses `GOOGLEFINANCE` in a helper tab named `Rates` and caches exchange rates for up to six hours. The converted value is stored when the transaction is recorded; existing rows are not automatically revalued.
 
 For analytics, the Worker reads the annual transaction tabs, filters by date and transaction type, groups `Amount_EUR` by category, and sorts totals from largest to smallest. It sends the total and a QuickChart chart to Telegram. Analytics cover all recorded users and accounts together.
 
@@ -206,10 +206,11 @@ Choose a category and account, then send the amount first, followed by an option
 | `20€ transport` | EUR 20 expense |
 | `500руб groceries` | RUB 500 expense |
 | `200лир bus tickets` | TRY 200 expense |
+| `25дол кафе` | USD 25 expense |
 | `+2500 salary` | EUR 2,500 income |
 | `+1000руб refund` | RUB 1,000 income |
 
-Use a decimal point, no thousands separators, and attach currency suffixes directly to the number. Use the Cyrillic suffixes `руб` and `лир` exactly as shown. A leading `+` marks income; an amount without it is treated as an expense. Enter positive amounts; zero is rejected. The parser is simple and does not strictly validate malformed amounts, so avoid comma decimals and unsupported currency notation.
+Use a decimal point, no thousands separators, and attach currency suffixes directly to the number. Use the Cyrillic suffixes `руб`, `лир`, and `дол` exactly as shown. A leading `+` marks income; an amount without it is treated as an expense. Enter positive amounts; zero is rejected. The parser is simple and does not strictly validate malformed amounts, so avoid comma decimals and unsupported currency notation.
 
 Your selected category and account remain active for subsequent messages. Choose **🧾 Транзакция** again to change them. Always finish selecting an account before sending an amount: the current code does not enforce that an account was selected.
 
