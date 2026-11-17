@@ -1,5 +1,7 @@
 # MoneyTsvetikBot
 
+> Новая схема операций и порядок обновления: [TRANSACTIONS.md](TRANSACTIONS.md). Описание ежедневного ввода ниже относится к прежней версии; используйте новую инструкцию.
+
 A Telegram bot for tracking personal and shared household finances in Google Sheets. Record an expense or income in a chat, choose its category and account, and review spending summaries without opening a spreadsheet each time.
 
 ## What is MoneyTsvetikBot?

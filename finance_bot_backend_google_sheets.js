@@ -1,91 +1,195 @@
-function doPost(e) {
-  try {
-    const data = JSON.parse(e.postData.contents);
+// ===== Столбцы таблицы =====
+// Первые девять столбцов сохраняют прежний порядок.
+const BASE_HEADERS = [
+  "Date",
+  "Type",
+  "Amount",
+  "Currency",
+  "Amount_EUR",
+  "Category",
+  "Description",
+  "Account",
+  "User"
+];
 
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+const EXTRA_HEADERS = [
+  "From_Account",
+  "To_Account",
+  "Transfer_In_Amount",
+  "Transfer_In_Currency",
+  "Transaction_ID"
+];
 
-    const year = new Date().getFullYear();
-    const sheetName = "Data" + year;
+const HEADERS = BASE_HEADERS.concat(EXTRA_HEADERS);
 
-
-    let sheet = ss.getSheetByName(sheetName);
-
-    if (!sheet) {
-      sheet = ss.insertSheet(sheetName);
-
-      sheet.appendRow([
-        "Date",
-        "Type",
-        "Amount",
-        "Currency",
-        "Amount_EUR",
-        "Category",
-        "Description",
-        "Account",
-        "User"
-      ]);
+// ===== Подготовка структуры таблицы =====
+// Добавляем столбцы справа, не переписывая исходные столбцы и старые суммы.
+function ensureSchema(sheet) {
+  if (sheet.getLastRow() === 0) {
+    if (sheet.getMaxColumns() < HEADERS.length) {
+      sheet.insertColumnsAfter(
+        sheet.getMaxColumns(),
+        HEADERS.length - sheet.getMaxColumns()
+      );
     }
 
-    const amountEUR = convertToEUR(data.amount, data.currency);
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+    return HEADERS.slice();
+  }
 
-    sheet.appendRow([
-      new Date(),
-      data.type,
-      data.amount,
-      data.currency,
-      amountEUR,
-      data.category,
-      data.description,
-      data.account,
-      data.user
-    ]);
+  const headers = sheet
+    .getRange(1, 1, 1, sheet.getLastColumn())
+    .getValues()[0];
 
-    const lastRow = sheet.getLastRow();
+  if (BASE_HEADERS.some((name, i) => headers[i] !== name)) {
+    throw new Error("Unexpected column order in " + sheet.getName());
+  }
 
-    // Доходы выделяем зелёным, у расходов сбрасываем унаследованную заливку.
-    sheet.getRange(lastRow, 1, 1, 9)
-      .setBackground(data.type === "income" ? "#d9f2d9" : null);
+  EXTRA_HEADERS.forEach(name => {
+    if (!headers.includes(name)) {
+      headers.push(name);
 
-    return ContentService.createTextOutput("ok");
+      if (headers.length > sheet.getMaxColumns()) {
+        sheet.insertColumnsAfter(sheet.getMaxColumns(), 1);
+      }
 
-  } catch (e) {
-    return ContentService.createTextOutput("error: " + e);
+      sheet.getRange(1, headers.length).setValue(name);
+    }
+  });
+
+  return headers;
+}
+
+// ===== Добавление столбцов во все ежегодные листы =====
+function migrateTransactionColumns() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    getDataSheetsOldestFirst().forEach(ensureSchema);
+  } finally {
+    lock.releaseLock();
   }
 }
 
-// ===== курс валют =====
-/*function convertToEUR(amount, currency) {
-  if (!amount) return "";
+// ===== Формирование JSON-ответа =====
+function jsonOutput(value) {
+  return ContentService
+    .createTextOutput(JSON.stringify(value))
+    .setMimeType(ContentService.MimeType.JSON);
+}
 
-  if (currency === "€") return amount;
+// ===== Сохранение новой операции =====
+function doPost(e) {
+  const lock = LockService.getScriptLock();
 
   try {
-    let pair = null;
+    lock.waitLock(30000);
 
-    if (currency === "₽") pair = "RUB-EUR";
-    if (currency === "₺") pair = "TRY-EUR";
+    const data = JSON.parse(e.postData.contents);
+    const types = ["expense", "income", "transfer", "refund"];
+    const currencies = ["€", "₽", "₺", "$"];
 
-    if (!pair) return amount;
-
-    const url = `https://www.google.com/finance/quote/${pair}`;
-    const html = UrlFetchApp.fetch(url).getContentText();
-
-    const match = html.match(/data-last-price="([0-9.]+)"/);
-
-    if (match && match[1]) {
-      return amount * parseFloat(match[1]);
+    // Проверяем тип, сумму, валюту и обязательные поля.
+    if (
+      !types.includes(data.type) ||
+      !Number.isFinite(data.amount) ||
+      data.amount <= 0 ||
+      !currencies.includes(data.currency) ||
+      !data.account ||
+      !data.user
+    ) {
+      throw new Error("Invalid transaction");
     }
 
-    return amount;
+    if (data.type !== "transfer" && !data.category) {
+      throw new Error("Category required");
+    }
 
-  } catch (e) {
-    return amount;
+    if (
+      data.type === "transfer" &&
+      (
+        !data.fromAccount ||
+        !data.toAccount ||
+        !Number.isFinite(data.receivedAmount) ||
+        data.receivedAmount <= 0 ||
+        !currencies.includes(data.receivedCurrency)
+      )
+    ) {
+      throw new Error("Invalid transfer");
+    }
+
+    // Находим лист текущего года и проверяем заголовки всех листов.
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheetName = "Data" + new Date().getFullYear();
+    const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+    const sheets = getDataSheetsOldestFirst();
+
+    sheets.forEach(ensureSchema);
+
+    // ID обновления Telegram защищает от повторного сохранения.
+    // Для клиентов без ID создаём UUID.
+    const id = data.transactionId || Utilities.getUuid();
+
+    for (const existing of sheets) {
+      const values = existing.getDataRange().getValues();
+      const idIndex = values[0].indexOf("Transaction_ID");
+
+      if (values.slice(1).some(row => row[idIndex] === id)) {
+        return ContentService.createTextOutput("ok");
+      }
+    }
+
+    // Собираем значения новой строки по названиям столбцов.
+    const headers = ensureSchema(sheet);
+    const incoming = data.type === "income" || data.type === "refund";
+
+    const record = {
+      Date: new Date(),
+      Type: data.type,
+      Amount: data.amount,
+      Currency: data.currency,
+      Amount_EUR: convertToEUR(data.amount, data.currency),
+      Category: data.category || "",
+      Description: data.description || "",
+      Account: data.account,
+      User: data.user,
+      From_Account: incoming ? "" : data.account,
+      To_Account:
+        data.type === "transfer"
+          ? data.toAccount
+          : incoming ? data.account : "",
+      Transfer_In_Amount: data.type === "transfer" ? data.receivedAmount : "",
+      Transfer_In_Currency: data.type === "transfer" ? data.receivedCurrency : "",
+      Transaction_ID: id
+    };
+
+    sheet.appendRow(
+      headers.map(name => record[name] === undefined ? "" : record[name])
+    );
+
+    // Цвет строки зависит от типа операции.
+    const colors = {
+      income: "#d9f2d9",
+      refund: "#fff2cc",
+      transfer: "#d9eaf7"
+    };
+
+    sheet
+      .getRange(sheet.getLastRow(), 1, 1, headers.length)
+      .setBackground(colors[data.type] || null);
+
+    return ContentService.createTextOutput("ok");
+  } catch (error) {
+    return ContentService.createTextOutput("error: " + error.message);
+  } finally {
+    lock.releaseLock();
   }
-}*/
+}
 
+// ===== Пересчёт суммы в евро =====
 function convertToEUR(amount, currency) {
   if (!amount) return "";
-
   if (currency === "€") return amount;
 
   try {
@@ -100,12 +204,12 @@ function convertToEUR(amount, currency) {
     const rate = getRate(from, "EUR");
 
     return amount * rate;
-
   } catch (e) {
     return amount;
   }
 }
 
+// ===== Получение и кеширование курса валют =====
 function getRate(from, to) {
   const cache = CacheService.getScriptCache();
   const key = `${from}_${to}`;
@@ -127,147 +231,113 @@ function getRate(from, to) {
   return rate || 1;
 }
 
-// ===== For getting information from the table for a chart =====
+// ===== Преобразование строки таблицы в операцию =====
+function rowTransaction(row, headers) {
+  const field = name => row[headers.indexOf(name)] || "";
+
+  return {
+    type: row[1],
+    amount: row[2],
+    currency: row[3],
+    category: row[5],
+    description: row[6],
+    account: row[7],
+    date: row[0],
+    fromAccount: field("From_Account"),
+    toAccount: field("To_Account"),
+    receivedAmount: field("Transfer_In_Amount"),
+    receivedCurrency: field("Transfer_In_Currency"),
+    transactionId: field("Transaction_ID")
+  };
+}
+
+// ===== Чтение операций и удаление по ID =====
 function doGet(e) {
+  const lock = LockService.getScriptLock();
 
-  if (e.parameter.getLast) {
-    const user = e.parameter.getLast;
+  try {
+    lock.waitLock(30000);
 
-    const sheets = getDataSheetsNewestFirst();
+    const sheets = getDataSheetsOldestFirst();
+    sheets.forEach(ensureSchema);
 
-    for (const sheet of sheets) {
-      const data = sheet.getDataRange().getValues();
+    const params = e.parameter || {};
 
-      for (let i = data.length - 1; i > 0; i--) {
-        const rowUser = data[i][8]; // User
+    // Ищем запись пользователя: для просмотра последней или удаления по ID.
+    if (params.getLast || params.deleteLast) {
+      const user = String(params.getLast || params.deleteLast).trim();
 
-        if (rowUser.toString().trim() === user.toString().trim()) {
-          return ContentService
-            .createTextOutput(JSON.stringify({
-              status: "found",
-              amount: data[i][2],
-              currency: data[i][3],
-              category: data[i][5],
-              description: data[i][6],
-              account: data[i][7],
-              date: data[i][0]
-            }))
-            .setMimeType(ContentService.MimeType.JSON);
-        }
-      }
-    }
+      for (const sheet of sheets.slice().reverse()) {
+        const values = sheet.getDataRange().getValues();
+        const headers = values[0];
 
-    return ContentService
-      .createTextOutput(JSON.stringify({ status: "not_found" }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
+        for (let i = values.length - 1; i > 0; i--) {
+          if (String(values[i][8]).trim() !== user) continue;
 
-  if (e.parameter.deleteLast) {
-    const user = e.parameter.deleteLast;
+          const idIndex = headers.indexOf("Transaction_ID");
 
-    const sheets = getDataSheetsNewestFirst();
+          if (
+            params.transactionId &&
+            values[i][idIndex] !== params.transactionId
+          ) {
+            continue;
+          }
 
-    for (const sheet of sheets) {
-      const data = sheet.getDataRange().getValues();
+          // Старой записи присваиваем ID при первом просмотре.
+          if (!values[i][idIndex]) {
+            values[i][idIndex] = Utilities.getUuid();
+            sheet.getRange(i + 1, idIndex + 1).setValue(values[i][idIndex]);
+          }
 
-      for (let i = data.length - 1; i > 0; i--) {
-        const rowUser = data[i][8]; // User
-        const date = new Date(data[i][0]); // Date
+          const transaction = rowTransaction(values[i], headers);
 
-        if (rowUser.toString().trim() === user.toString().trim()) {
-          const diff = Date.now() - date.getTime();
+          if (params.deleteLast) {
+            if (!params.transactionId) {
+              return jsonOutput({ status: "id_required" });
+            }
 
-          if (diff <= 86400000) {
-            const deletedRow = data[i];
+            const age = Date.now() - new Date(values[i][0]).getTime();
+
+            if (!Number.isFinite(age) || age < 0 || age > 86400000) {
+              return jsonOutput({ status: "too_late" });
+            }
 
             sheet.deleteRow(i + 1);
 
-            return ContentService
-              .createTextOutput(JSON.stringify({
-                status: "deleted",
-                amount: deletedRow[2],
-                currency: deletedRow[3],
-                category: deletedRow[5],
-                description: deletedRow[6],
-                account: deletedRow[7]
-              }))
-              .setMimeType(ContentService.MimeType.JSON);
-
-          } else {
-            return ContentService
-              .createTextOutput(JSON.stringify({ status: "too_late" }))
-              .setMimeType(ContentService.MimeType.JSON);
+            return jsonOutput({ ...transaction, status: "deleted" });
           }
+
+          return jsonOutput({ ...transaction, status: "found" });
         }
       }
+
+      return jsonOutput({ status: "not_found" });
     }
 
-    return ContentService
-      .createTextOutput(JSON.stringify({ status: "not_found" }))
-      .setMimeType(ContentService.MimeType.JSON);
+    // Объединяем ежегодные листы для аналитики.
+    const rows = [HEADERS];
+
+    sheets.forEach(sheet => {
+      const values = sheet.getDataRange().getValues();
+      const headers = values[0];
+
+      values.slice(1).forEach(row => rows.push(
+        HEADERS.map(name => row[headers.indexOf(name)] ?? "")
+      ));
+    });
+
+    return jsonOutput(rows);
+  } catch (error) {
+    return jsonOutput({ status: "error", message: error.message });
+  } finally {
+    lock.releaseLock();
   }
-
-  const data = getAllDataRows();
-
-  return ContentService
-    .createTextOutput(JSON.stringify(data))
-    .setMimeType(ContentService.MimeType.JSON);
-
 }
 
-function getAllDataRows() {
-  const sheets = getDataSheetsOldestFirst();
-
-  if (sheets.length === 0) {
-    return [[
-      "Date",
-      "Type",
-      "Amount",
-      "Currency",
-      "Amount_EUR",
-      "Category",
-      "Description",
-      "Account",
-      "User"
-    ]];
-  }
-
-  const rows = [];
-
-  sheets.forEach((sheet, index) => {
-    const data = sheet.getDataRange().getValues();
-
-    if (data.length === 0) return;
-
-    if (index === 0) {
-      rows.push(data[0]);
-    }
-
-    rows.push(...data.slice(1));
-  });
-
-  return rows;
-}
-
-function getDataSheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheetName = "Data" + new Date().getFullYear();
-  const sheet = ss.getSheetByName(sheetName);
-
-  if (!sheet) {
-    throw new Error("Sheet not found: " + sheetName);
-  }
-
-  return sheet;
-}
-
+// ===== Ежегодные листы, от старых к новым =====
 function getDataSheetsOldestFirst() {
   return SpreadsheetApp.getActiveSpreadsheet()
     .getSheets()
     .filter(sheet => /^Data\d{4}$/.test(sheet.getName()))
     .sort((a, b) => a.getName().localeCompare(b.getName()));
-}
-
-function getDataSheetsNewestFirst() {
-  return getDataSheetsOldestFirst().reverse();
 }

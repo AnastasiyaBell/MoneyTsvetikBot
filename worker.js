@@ -76,7 +76,7 @@ async function handleRequest(request, env) {
     }
 
     if (text === "🧾 Транзакция") {
-      await sendCategoryKeyboard(env, chatId);
+      await sendTypeMenu(env, chatId);
       return new Response("ok");
     }
 
@@ -133,10 +133,14 @@ async function handleRequest(request, env) {
         return new Response("ok");
       }
 
+      if (data.status !== "found" || !data.transactionId) {
+        await sendMessage(env, chatId, "Не удалось загрузить операцию. Проверь обновление Apps Script.");
+        return new Response("ok");
+      }
       await sendInlineKeyboard(env, chatId,
-        `Удалить эту транзакцию?\n\n💸 ${data.amount}${data.currency}\n📂 ${data.category}\n💳 ${data.account}\n📝 ${data.description || "-"}`,
+        "Удалить эту транзакцию?\n\n" + formatTransaction(data),
         [
-          [{ text: "✅ Удалить", callback_data: "undo_last_confirm" }],
+          [{ text: "✅ Удалить", callback_data: `undo_${data.transactionId}` }],
           [{ text: "❌ Отмена", callback_data: "cancel" }]
         ]
       );
@@ -144,77 +148,62 @@ async function handleRequest(request, env) {
       return new Response("ok");
     }
 
-    // ===== ОЖИДАНИЕ НОВОЙ КАТЕГОРИИ =====
-    const awaiting = await env.KV.get(`await_${chatId}`);
 
-    if (awaiting) {
-      const newCategory = text;
-
-      await addCategory(env, newCategory);
-      await env.KV.put(`cat_${chatId}`, newCategory);
-      await env.KV.delete(`await_${chatId}`);
-
-      await sendMessage(env, chatId, `Новая категория сохранена: ${newCategory}`);
-      await sendAccountKeyboard(env, chatId); // 👈 сразу счёт
+    if (typeof text !== "string") return new Response("ok");
+    const type = await env.KV.get(`type_${chatId}`);
+    if (!TYPE_LABELS[type]) {
+      await sendTypeMenu(env, chatId);
       return new Response("ok");
     }
-
-    // ===== ПРОВЕРКА ВЫБРАННОЙ КАТЕГОРИИ =====
-    const selectedCategory = await env.KV.get(`cat_${chatId}`);
-
-    if (!selectedCategory) {
-      //await sendMessage(env, chatId, "Сначала выбери категорию 👇");
+    if (await env.KV.get(`await_${chatId}`)) {
+      await addCategory(env, text.trim());
+      await env.KV.put(`cat_${chatId}`, text.trim());
+      await env.KV.delete(`await_${chatId}`);
+      await sendAccountKeyboard(env, chatId);
+      return new Response("ok");
+    }
+    if (await env.KV.get(`await_account_${chatId}`)) {
+      await addAccount(env, text.trim());
+      await env.KV.delete(`await_account_${chatId}`);
+      await selectAccount(env, chatId, text.trim());
+      return new Response("ok");
+    }
+    const category = type === "transfer" ? "" : await env.KV.get(`cat_${chatId}`);
+    if (type !== "transfer" && !category) {
       await sendCategoryKeyboard(env, chatId);
       return new Response("ok");
     }
-
-    const awaitingAccount = await env.KV.get(`await_account_${chatId}`);
-
-    if (awaitingAccount) {
-      const newAccount = text;
-
-      await addAccount(env, newAccount);
-      await env.KV.put(`acc_${chatId}`, newAccount);
-      await env.KV.delete(`await_account_${chatId}`);
-
-      await sendMessage(env, chatId, `Счет сохранен: ${newAccount}`);
+    const account = await env.KV.get(`acc_${chatId}`);
+    const toAccount = await env.KV.get(`to_${chatId}`);
+    if (!account || (type === "transfer" && !toAccount)) {
+      await sendAccountKeyboard(env, chatId);
       return new Response("ok");
     }
-
-    // ===== проверка выбранного счета =====
-    const selectedAccount = await env.KV.get(`acc_${chatId}`);
-
-    const parsed = parseMessage(text);
-
+    const parsed = parseMessage(text, type);
     if (!parsed) {
-      await sendMessage(env, chatId, "Пример: 25 лидл");
+      await sendMessage(env, chatId, type === "transfer"
+        ? "Введи: 100 / 108дол или 100дол / 9500руб. Одна сумма: 100. Без приписки — евро."
+        : "Введи положительную сумму и описание: 25 продукты, 500руб продукты, 20лир автобус, 25дол кафе. Без приписки — евро.");
       return new Response("ok");
     }
-
-    await saveToSheet(env, {
-      ...parsed,
-      category: selectedCategory,
-      account: selectedAccount,
-      user: userName
-    });
-
-    await sendMessage(
-      env,
-      chatId,
-      `Сохранено: ${parsed.amount}${parsed.currency} → ${selectedCategory} со счета ${selectedAccount}`
-    );
-
-    //const userName = USERS[chatId];
-    const userIds = Object.keys(USERS);
-
-    for (const id of userIds) {
-      if (parseInt(id) === chatId) continue; // не себе
-
-      const notify = await isNotifyEnabled(env, id);
-      if (!notify) continue;
-
-      await sendMessage(env, id,
-        `💸 ${userName}: ${parsed.amount}${parsed.currency}\n${selectedCategory} | ${selectedAccount}`);
+    const transaction = {
+      ...parsed, category, account, user: userName,
+      transactionId: `tg_${data.update_id}`,
+      fromAccount: type === "expense" || type === "transfer" ? account : "",
+      toAccount: type === "transfer" ? toAccount : type === "income" || type === "refund" ? account : ""
+    };
+    try {
+      await saveToSheet(env, transaction);
+    } catch (error) {
+      console.error("save:error", error.message);
+      await sendMessage(env, chatId, "Не удалось подтвердить сохранение. Проверь таблицу перед повторным вводом.");
+      return new Response("ok");
+    }
+    await sendMessage(env, chatId, "Сохранено ✅\n" + formatTransaction(transaction));
+    for (const id of Object.keys(USERS)) {
+      if (Number(id) !== chatId && await isNotifyEnabled(env, id)) {
+        await sendMessage(env, id, userName + ":\n" + formatTransaction(transaction));
+      }
     }
 
   return new Response("ok");
@@ -353,39 +342,41 @@ async function handleCallback(callback, env) {
   const data = callback.data;
   const chatId = callback.message.chat.id;
 
-  if (data === "new_category") {
-    await env.KV.put(`await_${chatId}`, "1", { expirationTtl: 300 });
-    await sendMessage(env, chatId, "Введи новую категорию:");
+  if (!USERS[chatId]) return;
+  if (data.startsWith("type_")) {
+    const type = data.slice(5);
+    if (!TYPE_LABELS[type]) return;
+    await env.KV.put(`type_${chatId}`, type);
+    for (const key of ["cat", "acc", "to", "await", "await_account"]) await env.KV.delete(`${key}_${chatId}`);
+    if (type === "transfer") await sendAccountKeyboard(env, chatId);
+    else await sendCategoryKeyboard(env, chatId);
     return;
   }
-
+  if (data === "new_category") {
+    const type = await env.KV.get(`type_${chatId}`);
+    if (type !== "expense" && type !== "refund") return;
+    await env.KV.put(`await_${chatId}`, "1", { expirationTtl: 300 });
+    await sendMessage(env, chatId, "Введи новую категорию расходов:");
+    return;
+  }
   if (data === "new_account") {
     await env.KV.put(`await_account_${chatId}`, "1", { expirationTtl: 300 });
     await sendMessage(env, chatId, "Введи название счета:");
     return;
   }
-
   if (data.startsWith("cat_")) {
-    const category = data.replace("cat_", "");
-
+    const type = await env.KV.get(`type_${chatId}`);
+    const categories = type === "income" ? INCOME_CATEGORIES : await getCategories(env);
+    const category = data.slice(4);
+    if (!TYPE_LABELS[type] || type === "transfer" || !categories.includes(category)) return;
     await env.KV.put(`cat_${chatId}`, category);
-
-    await sendMessage(
-      env,
-      chatId,
-      `Выбрана категория: ${category}\nТеперь выбери счет:`
-    );
-
+    await env.KV.delete(`acc_${chatId}`);
     await sendAccountKeyboard(env, chatId);
     return;
   }
-
   if (data.startsWith("acc_")) {
-    const account = data.replace("acc_", "");
-
-    await env.KV.put(`acc_${chatId}`, account);
-
-    await sendMessage(env, chatId, `Счет: ${account}\nТеперь введи сумму и описание, например: 5 реве\nВНИМАНИЕ: в другой валюте добавь буквы к сумме - 500руб пирожное, 20лир автобус, 25дол кафе`);
+    const account = data.slice(4);
+    if ((await getAccounts(env)).includes(account)) await selectAccount(env, chatId, account);
     return;
   }
 
@@ -409,7 +400,7 @@ async function handleCallback(callback, env) {
 
     const result = await getAnalytics(env, parseInt(days), type);
 
-    await sendChart(env, chatId, result.labels, result.values, "Аналитика");
+    await sendChart(env, chatId, result.labels, result.values, type === "expense" ? "Расходы за вычетом возвратов" : "Доходы");
 
     return;
   }
@@ -458,14 +449,16 @@ async function handleCallback(callback, env) {
     return;
   }
 
-  if (data === "undo_last_confirm") {
+  if (data.startsWith("undo_")) {
     const userName = USERS[chatId];
-    const res = await fetch(env.SHEET_URL + "?deleteLast=" + encodeURIComponent(userName));
+    const transactionId = data.slice(5);
+    if (transactionId === "last_confirm") { await sendMessage(env, chatId, "Выбери удаление заново."); return; }
+    const res = await fetch(env.SHEET_URL + "?deleteLast=" + encodeURIComponent(userName) + "&transactionId=" + encodeURIComponent(transactionId));
     const result = await res.json();
 
     if (result.status === "deleted") {
       await sendMessage(env, chatId,
-        `Удалено ✅\n\n💸 ${result.amount}${result.currency}\n📂 ${result.category}\n💳 ${result.account}`
+        "Удалено ✅\n\n" + formatTransaction(result)
       );
     } else if (result.status === "too_late") {
       await sendMessage(env, chatId, "Можно удалить только в течение 24 часов");
@@ -483,78 +476,85 @@ async function handleCallback(callback, env) {
 }
 
 // ===== КНОПКИ =====
+const TYPE_LABELS = { expense: "💸 Расход", income: "💰 Доход", transfer: "🔄 Между своими", refund: "↩️ Мне вернули" };
+const INCOME_CATEGORIES = ["Зарплата", "Подработка", "Сдача квартиры", "Подарки", "Социальное", "Возврат налогов", "Другое"];
+
+async function sendTypeMenu(env, chatId) {
+  for (const key of ["type", "cat", "acc", "to", "await", "await_account"]) await env.KV.delete(`${key}_${chatId}`);
+  await sendInlineKeyboard(env, chatId, "Выбери тип операции:", buildTwoColumnKeyboard(
+    Object.entries(TYPE_LABELS).map(([type, text]) => ({ text, callback_data: "type_" + type }))
+  ));
+}
+
 async function sendCategoryKeyboard(env, chatId) {
-  const categories = await getCategories(env);
-
-  const keyboard = buildTwoColumnKeyboard(categories.map(c => ({
-    text: c,
-    callback_data: `cat_${c}`
-  })));
-
-  keyboard.push([{ text: "➕ Новая категория", callback_data: "new_category" }]);
-
-  keyboard.push([{ text: "📊 Аналитика", callback_data: "go_analytics" }]);
-
-  await sendInlineKeyboard(env, chatId, "Выбери категорию:", keyboard);
+  const type = await env.KV.get(`type_${chatId}`);
+  if (!TYPE_LABELS[type]) return sendTypeMenu(env, chatId);
+  const categories = type === "income" ? INCOME_CATEGORIES : await getCategories(env);
+  const keyboard = buildTwoColumnKeyboard(categories.map(c => ({ text: c, callback_data: "cat_" + c })));
+  if (type !== "income") keyboard.push([{ text: "➕ Новая категория", callback_data: "new_category" }]);
+  await sendInlineKeyboard(env, chatId, TYPE_LABELS[type] + " — выбери категорию:", keyboard);
 }
 
 async function sendAccountKeyboard(env, chatId) {
-  const accounts = await getAccounts(env);
-
-  const keyboard = buildTwoColumnKeyboard(
-    accounts.map(a => ({ text: a, callback_data: `acc_${a}` }))
-  );
-
+  const type = await env.KV.get(`type_${chatId}`);
+  const from = await env.KV.get(`acc_${chatId}`);
+  const keyboard = buildTwoColumnKeyboard((await getAccounts(env)).map(a => ({ text: a, callback_data: "acc_" + a })));
   keyboard.push([{ text: "➕ Новый счет", callback_data: "new_account" }]);
+  const prompt = type === "transfer" ? from ? "Куда? Выбери счет поступления:" : "Откуда? Выбери счет списания:"
+    : type === "expense" ? "Выбери счет списания:" : "Выбери счет поступления:";
+  await sendInlineKeyboard(env, chatId, prompt, keyboard);
+}
 
-  await sendInlineKeyboard(env, chatId, "Выбери счет:", keyboard);
+async function selectAccount(env, chatId, account) {
+  const type = await env.KV.get(`type_${chatId}`);
+  if (!TYPE_LABELS[type]) return sendTypeMenu(env, chatId);
+  const from = await env.KV.get(`acc_${chatId}`);
+  if (type === "transfer" && from) {
+    await env.KV.put(`to_${chatId}`, account);
+    await sendMessage(env, chatId, from + " → " + account + "\nВведи: 100 / 108дол или 100дол / 9500руб. Одна сумма: 100. Можно добавить описание после суммы. Без приписки — евро.");
+  } else {
+    await env.KV.put(`acc_${chatId}`, account);
+    if (type === "transfer") await sendAccountKeyboard(env, chatId);
+    else await sendMessage(env, chatId, TYPE_LABELS[type] + " | " + account + "\nВведи сумму и описание: 25 продукты, 500руб продукты, 20лир автобус, 25дол кафе. Без приписки — евро. Плюс не нужен.");
+  }
 }
 
 // ===== ПАРСЕР =====
-function parseMessage(text) {
-  const parts = text.split(" ");
-
-  let rawAmount = parts[0];
-  let type = "expense";
-
-  if (rawAmount.startsWith("+")) {
-    type = "income";
-    rawAmount = rawAmount.replace("+", "");
+function parseMessage(text, type = "expense") {
+  if (typeof text !== "string") return null;
+  const token = "([0-9]+(?:[.,][0-9]+)?)(руб|лир|дол|€)?";
+  const currencies = { руб: "₽", лир: "₺", дол: "$", "€": "€" };
+  const pattern = type === "transfer"
+    ? new RegExp("^" + token + "(?:\\s*/\\s*" + token + ")?(?:\\s+(.+))?$", "i")
+    : new RegExp("^\\+?" + token + "(?:\\s+(.+))?$", "i");
+  const match = text.trim().match(pattern);
+  if (!match || (type === "transfer" && text.includes("/") && !match[3])) return null;
+  const amount = Number(match[1].replace(",", "."));
+  const currency = currencies[(match[2] || "").toLowerCase()] || "€";
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const result = { type, amount, currency, description: match[type === "transfer" ? 5 : 3] || "" };
+  if (type === "transfer") {
+    result.receivedAmount = match[3] ? Number(match[3].replace(",", ".")) : amount;
+    result.receivedCurrency = match[3] ? currencies[(match[4] || "").toLowerCase()] || "€" : currency;
+    if (!Number.isFinite(result.receivedAmount) || result.receivedAmount <= 0) return null;
   }
-
-  let currency = "€";
-
-  if (rawAmount.includes("руб")) {
-    currency = "₽";
-    rawAmount = rawAmount.replace("руб", "");
-  } else if (rawAmount.includes("лир")) {
-    currency = "₺";
-    rawAmount = rawAmount.replace("лир", "");
-  } else if (rawAmount.includes("дол")) {
-    currency = "$";
-    rawAmount = rawAmount.replace("дол", "");
-  } else if (rawAmount.includes("€")) {
-    currency = "€";
-    rawAmount = rawAmount.replace("€", "");
-  }
-
-  const amount = parseFloat(rawAmount);
-  if (!amount) return null;
-
-  const description = parts.slice(1).join(" "); // 💥 ВСЁ — описание
-
-  return { type, amount, currency, description };
+  return result;
 }
 
-// ===== СОХРАНЕНИЕ =====
 async function saveToSheet(env, data) {
-  await fetch(env.SHEET_URL, {
-    method: "POST",
-    headers: {
-    "Content-Type": "application/json"
-  },
-    body: JSON.stringify(data)
+  const response = await fetch(env.SHEET_URL, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data)
   });
+  const body = await response.text();
+  if (!response.ok || body.trim() !== "ok") throw new Error("Backend rejected transaction");
+}
+
+function formatTransaction(t) {
+  if (t.type === "transfer") return TYPE_LABELS.transfer + ": " + t.fromAccount + " → " + t.toAccount +
+    "\nСписано: " + t.amount + t.currency + "\nПоступило: " + t.receivedAmount + t.receivedCurrency +
+    (t.description ? "\n" + t.description : "");
+  return (TYPE_LABELS[t.type] || t.type || "Операция") + ": " + t.amount + t.currency +
+    "\n" + t.category + " | " + t.account + (t.description ? "\n" + t.description : "");
 }
 
 // ===== TELEGRAM =====
@@ -725,7 +725,7 @@ async function getAnalytics(env, days, type) {
   const now = Date.now();
   const filtered = rows.slice(1).filter(r => {
     const date = new Date(r[0]).getTime();
-    return Number.isFinite(date) && (now - date) <= days * 86400000 && r[1] === type;
+    return Number.isFinite(date) && (now - date) <= days * 86400000 && date <= now && (r[1] === type || (type === "expense" && r[1] === "refund"));
   });
 
   console.log("analytics:filtered", {
@@ -734,7 +734,7 @@ async function getAnalytics(env, days, type) {
     rows: filtered.length
   });
 
-  const map = {};
+  const map = Object.create(null);
 
   filtered.forEach(r => {
     const category = r[5];
@@ -742,7 +742,7 @@ async function getAnalytics(env, days, type) {
 
     if (!category || !Number.isFinite(amount)) return;
 
-    map[category] = (map[category] || 0) + amount;
+    map[category] = (map[category] || 0) + (r[1] === "refund" ? -amount : amount);
   });
 
   const sorted = Object.entries(map)
