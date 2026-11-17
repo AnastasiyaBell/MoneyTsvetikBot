@@ -455,6 +455,7 @@ async function handleCallback(callback, env) {
     if (transactionId === "last_confirm") { await sendMessage(env, chatId, "Выбери удаление заново."); return; }
     const res = await fetch(env.SHEET_URL + "?deleteLast=" + encodeURIComponent(userName) + "&transactionId=" + encodeURIComponent(transactionId));
     const result = await res.json();
+    invalidateAnalytics(env);
 
     if (result.status === "deleted") {
       await sendMessage(env, chatId,
@@ -542,10 +543,13 @@ function parseMessage(text, type = "expense") {
 }
 
 async function saveToSheet(env, data) {
+  // Сбрасываем кеш и при неоднозначном результате сетевого запроса.
+  invalidateAnalytics(env);
   const response = await fetch(env.SHEET_URL, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data)
   });
   const body = await response.text();
+  invalidateAnalytics(env);
   if (!response.ok || body.trim() !== "ok") throw new Error("Backend rejected transaction");
 }
 
@@ -755,24 +759,54 @@ function findLegacyTransferRows(rows) {
   return excluded;
 }
 
-async function getAnalytics(env, days, type) {
-  const res = await fetch(env.SHEET_URL);
-  const rows = await res.json();
+// Короткий кеш в памяти Worker: повторные отчёты используют одну загрузку.
+// Другие экземпляры Worker могут видеть прежние данные не дольше 30 секунд.
+const ANALYTICS_CACHE_MS = 30000;
+const analyticsSnapshots = new Map();
 
-  console.log("analytics:loaded", {
-    days,
-    type,
-    rows: Array.isArray(rows) ? rows.length : 0
-  });
+function invalidateAnalytics(env) {
+  analyticsSnapshots.delete(env.SHEET_URL);
+}
 
-  if (!Array.isArray(rows)) {
-    console.log("analytics:invalid_response");
-    return { labels: [], values: [] };
+async function loadAnalyticsSnapshot(env) {
+  const key = env.SHEET_URL;
+  const cached = analyticsSnapshots.get(key);
+  if (cached && (cached.pending || cached.expiresAt > Date.now())) {
+    return cached.promise;
   }
 
-  const transactions = rows.slice(1);
-  // Ищем пары во всей истории, даже если вторая запись вне выбранного периода.
-  const legacyTransfers = findLegacyTransferRows(transactions);
+  const entry = { pending: true, expiresAt: 0, promise: null };
+  entry.promise = (async () => {
+    const started = Date.now();
+    const response = await fetch(key);
+    if (!response.ok) throw new Error("Could not load analytics");
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new Error("Invalid analytics response");
+
+    const transactions = rows.slice(1);
+    const legacyTransfers = findLegacyTransferRows(transactions);
+    console.log("analytics:snapshot", {
+      durationMs: Date.now() - started,
+      rows: transactions.length
+    });
+    return { transactions, legacyTransfers };
+  })();
+  analyticsSnapshots.set(key, entry);
+
+  try {
+    const snapshot = await entry.promise;
+    entry.expiresAt = Date.now() + ANALYTICS_CACHE_MS;
+    return snapshot;
+  } catch (error) {
+    if (analyticsSnapshots.get(key) === entry) analyticsSnapshots.delete(key);
+    throw error;
+  } finally {
+    entry.pending = false;
+  }
+}
+
+async function getAnalytics(env, days, type) {
+  const { transactions, legacyTransfers } = await loadAnalyticsSnapshot(env);
   const now = Date.now();
   const filtered = transactions.filter((r, index) => {
     if (legacyTransfers.has(index)) return false;

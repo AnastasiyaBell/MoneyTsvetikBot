@@ -253,6 +253,17 @@ function rowTransaction(row, headers) {
 
 // ===== Чтение операций и удаление по ID =====
 function doGet(e) {
+  const params = e.parameter || {};
+
+  // Чтение аналитики не меняет таблицу, поэтому не ждёт блокировку записи.
+  if (!params.getLast && !params.deleteLast) {
+    try {
+      return jsonOutput(readAnalyticsRows());
+    } catch (error) {
+      return jsonOutput({ status: "error", message: error.message });
+    }
+  }
+
   const lock = LockService.getScriptLock();
 
   try {
@@ -314,24 +325,34 @@ function doGet(e) {
       return jsonOutput({ status: "not_found" });
     }
 
-    // Объединяем ежегодные листы для аналитики.
-    const rows = [HEADERS];
-
-    sheets.forEach(sheet => {
-      const values = sheet.getDataRange().getValues();
-      const headers = values[0];
-
-      values.slice(1).forEach(row => rows.push(
-        HEADERS.map(name => row[headers.indexOf(name)] ?? "")
-      ));
-    });
-
-    return jsonOutput(rows);
   } catch (error) {
     return jsonOutput({ status: "error", message: error.message });
   } finally {
     lock.releaseLock();
   }
+}
+
+// ===== Чтение истории для аналитики без изменения листов =====
+function readAnalyticsRows() {
+  const rows = [HEADERS];
+
+  getDataSheetsOldestFirst().forEach(sheet => {
+    // Один запрос значений вместо отдельных запросов заголовков и схемы.
+    const values = sheet.getDataRange().getValues();
+    const headers = values[0] || [];
+    if (headers.length === 0) return;
+
+    if (BASE_HEADERS.some((name, index) => headers[index] !== name)) {
+      throw new Error("Unexpected column order in " + sheet.getName());
+    }
+
+    const indices = HEADERS.map(name => headers.indexOf(name));
+    values.slice(1).forEach(row => {
+      rows.push(indices.map(index => index < 0 ? "" : row[index] ?? ""));
+    });
+  });
+
+  return rows;
 }
 
 // ===== Ежегодные листы, от старых к новым =====

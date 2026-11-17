@@ -5,11 +5,12 @@ const worker = await fs.readFile(new URL('./worker.js', import.meta.url), 'utf8'
 const backend = await fs.readFile(new URL('./finance_bot_backend_google_sheets.js', import.meta.url), 'utf8');
 const storage = new Map();
 const kv = { get: async k => storage.get(k) ?? null, put: async (k,v) => storage.set(k,v), delete: async k => storage.delete(k) };
-const sent = []; const saved = []; let analyticsRows = [];
+const sent = []; const saved = []; let analyticsRows = []; let analyticsLoads = 0;
 const context = vm.createContext({ console: {log(){},error(){}}, Response, Date,
   fetch: async (url, options) => {
     if (url.startsWith('https://api.telegram.org/')) { sent.push(JSON.parse(options.body)); return new Response('{}'); }
     if (options?.method === 'POST') { saved.push(JSON.parse(options.body)); return new Response('ok'); }
+    analyticsLoads++;
     return Response.json(analyticsRows);
   }
 });
@@ -39,9 +40,23 @@ assert.ok(sent.some(p=>p.reply_markup?.inline_keyboard?.flat().some(b=>b.text===
 await callback('cat_Зарплата'); await callback('acc_cash');
 await context.handleRequest({method:'POST',json:async()=>({update_id:43,message:{chat:{id:chat},text:'2500'}})},env);
 assert.equal(saved[1].type,'income'); assert.equal(saved[1].fromAccount,''); assert.equal(saved[1].toAccount,'cash');
+context.invalidateAnalytics(env);
 analyticsRows = [['Date','Type'],[new Date(),'expense',100,'€',100,'Еда'],[new Date(),'refund',40,'€',40,'Еда'],[new Date(),'transfer',1000,'€',1000,'Еда'],[new Date(),'income',200,'€',200,'Зарплата']];
 assert.equal((await context.getAnalytics(env,7,'expense')).values[0],60);
 assert.equal((await context.getAnalytics(env,7,'income')).values[0],200);
+const loadsAfterReport = analyticsLoads;
+await Promise.all([context.getAnalytics(env,30,'expense'), context.getAnalytics(env,365,'income')]);
+assert.equal(analyticsLoads, loadsAfterReport); // Reports reuse the loaded history.
+context.invalidateAnalytics(env);
+await Promise.all([context.getAnalytics(env,7,'expense'), context.getAnalytics(env,7,'income')]);
+assert.equal(analyticsLoads, loadsAfterReport + 1); // Simultaneous reports share one request.
+const realDate = context.Date;
+context.Date = class extends Date { static now() { return Date.now() + 31000; } };
+await context.getAnalytics(env,7,'expense');
+assert.equal(analyticsLoads, loadsAfterReport + 2); // Cache expires.
+context.Date = realDate;
+
+context.invalidateAnalytics(env);
 analyticsRows = [['Date','Type'],[new Date(),'refund',40,'€',40,'Одежда']];
 assert.equal((await context.getAnalytics(env,7,'expense')).values[0],-40);
 
@@ -81,6 +96,7 @@ assert.deepEqual(excluded([
 ]), [0,1,2]); // Each row has a complementary row, as requested.
 const savedNow = context.Date;
 context.Date = class extends Date { static now() { return Date.parse('2026-11-18T12:00:00Z'); } };
+context.invalidateAnalytics(env);
 analyticsRows = [['Date','Type'],
   legacy('2026-11-15','expense'), legacy('2026-11-16','income'),
   legacy('2026-11-15','expense',30), // Unmatched expense stays.
@@ -89,6 +105,7 @@ analyticsRows = [['Date','Type'],
 assert.equal((await context.getAnalytics(env,365,'expense')).values[0],100);
 assert.equal((await context.getAnalytics(env,365,'income')).values[0],70);
 // Complementary income is outside the 7-day window, but still excludes expense.
+context.invalidateAnalytics(env);
 analyticsRows = [['Date','Type'], legacy('2026-11-11T13:00:00Z','expense'), legacy('2026-11-10T13:00:00Z','income')];
 assert.equal((await context.getAnalytics(env,7,'expense')).values.length,0);
 context.Date = savedNow;
@@ -117,6 +134,10 @@ const backendContext=vm.createContext({Date,Number,JSON, console,
  ContentService:{createTextOutput:output,MimeType:{JSON:'json'}},Utilities:{getUuid:()=> 'uuid'}
 });
 vm.runInContext(backend,backendContext);
+const initialHistory = JSON.parse(backendContext.doGet({parameter:{}}).text);
+assert.equal(initialHistory[1][2],25);
+assert.equal(sheet.rows[0].length,9); // Reading does not migrate or modify the sheet.
+assert.deepEqual(sheet.rows[1],oldRow);
 backendContext.migrateTransactionColumns(); backendContext.migrateTransactionColumns();
 assert.equal(sheet.rows[0].length,14); assert.deepEqual(sheet.rows[1],oldRow);
 assert.deepEqual(sheet.rows[0].slice(0,9),base);
