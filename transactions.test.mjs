@@ -45,6 +45,54 @@ assert.equal((await context.getAnalytics(env,7,'income')).values[0],200);
 analyticsRows = [['Date','Type'],[new Date(),'refund',40,'€',40,'Одежда']];
 assert.equal((await context.getAnalytics(env,7,'expense')).values[0],-40);
 
+
+
+// Historical transfer matching uses both original amount and currency.
+const legacy = (date, type, amount = 100, currency = '€', category = 'Перевод', eur = amount) =>
+  [date, type, amount, currency, eur, category];
+const excluded = rows => Array.from(context.findLegacyTransferRows(rows)).sort((a,b)=>a-b);
+assert.deepEqual(excluded([
+  legacy('2026-11-14T10:00:00Z','expense'),
+  legacy('2026-11-15T22:00:00Z','income')
+]), [0,1]); // Adjacent calendar days, even more than 24 hours apart.
+assert.deepEqual(excluded([
+  legacy('2026-11-16T00:00:00Z','income'),
+  legacy('2026-11-15T00:00:00Z','expense')
+]), [0,1]);
+assert.deepEqual(excluded([
+  legacy('2026-11-15','expense'), legacy('2026-11-15','income',100,'€','Перевод',99)
+]), [0,1]);
+for (const other of [
+  legacy('2026-11-17','income'),
+  legacy('2026-11-16T23:00:00Z','income'), // Already November 17 in Berlin.
+  legacy('2026-11-13','income'),
+  legacy('2026-11-15','income',101),
+  legacy('2026-11-15','income',100,'$'),
+  legacy('2026-11-15','income',100,'€','Другое'),
+  legacy('2026-11-15','expense'),
+  legacy('2026-11-15','refund'),
+  legacy('invalid','income')
+]) assert.deepEqual(excluded([legacy('2026-11-16','expense'),other]), []);
+assert.deepEqual(excluded([
+  legacy('2026-11-17','expense'),legacy('2026-11-17','income')
+]), []);
+assert.deepEqual(excluded([
+  legacy('2026-11-15','expense'),legacy('2026-11-15','income'),legacy('2026-11-15','expense')
+]), [0,1,2]); // Each row has a complementary row, as requested.
+const savedNow = context.Date;
+context.Date = class extends Date { static now() { return Date.parse('2026-11-18T12:00:00Z'); } };
+analyticsRows = [['Date','Type'],
+  legacy('2026-11-15','expense'), legacy('2026-11-16','income'),
+  legacy('2026-11-15','expense',30), // Unmatched expense stays.
+  legacy('2026-11-17','expense',70), legacy('2026-11-17','income',70)
+];
+assert.equal((await context.getAnalytics(env,365,'expense')).values[0],100);
+assert.equal((await context.getAnalytics(env,365,'income')).values[0],70);
+// Complementary income is outside the 7-day window, but still excludes expense.
+analyticsRows = [['Date','Type'], legacy('2026-11-11T13:00:00Z','expense'), legacy('2026-11-10T13:00:00Z','income')];
+assert.equal((await context.getAnalytics(env,7,'expense')).values.length,0);
+context.Date = savedNow;
+
 class Sheet {
  constructor(rows) { this.rows=rows; this.columns=9; }
  getName(){return 'Data2026';} getLastRow(){return this.rows.length;}

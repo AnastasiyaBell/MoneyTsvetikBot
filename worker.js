@@ -707,6 +707,54 @@ async function sendChart(env, chatId, labels, values, title) {
   });
 }
 
+// Старые переводы сравниваем по календарным дням в часовом поясе учёта.
+// Сумма берётся из Amount вместе с Currency: курсы Amount_EUR могли отличаться.
+function findLegacyTransferRows(rows) {
+  const dayFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const cutoffDay = Date.UTC(2026, 10, 17) / 86400000;
+  const candidates = [];
+  const groups = new Map();
+
+  rows.forEach((row, index) => {
+    if (
+      (row[1] !== "expense" && row[1] !== "income") ||
+      String(row[5] || "").trim() !== "Перевод"
+    ) return;
+
+    const date = new Date(row[0]);
+    const amount = Number(row[2]);
+    const currency = String(row[3] || "").trim();
+    if (!Number.isFinite(date.getTime()) || !Number.isFinite(amount) || amount <= 0 || !currency) return;
+
+    const parts = Object.fromEntries(
+      dayFormatter.formatToParts(date).map(part => [part.type, part.value])
+    );
+    const day = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)) / 86400000;
+    if (day >= cutoffDay) return;
+
+    const key = JSON.stringify([amount, currency]);
+    if (!groups.has(key)) groups.set(key, { expense: new Set(), income: new Set() });
+    groups.get(key)[row[1]].add(day);
+    candidates.push({ index, key, day, type: row[1] });
+  });
+
+  const excluded = new Set();
+  for (const candidate of candidates) {
+    const opposite = candidate.type === "expense" ? "income" : "expense";
+    const days = groups.get(candidate.key)[opposite];
+    if ([candidate.day - 1, candidate.day, candidate.day + 1].some(day => days.has(day))) {
+      excluded.add(candidate.index);
+    }
+  }
+
+  return excluded;
+}
+
 async function getAnalytics(env, days, type) {
   const res = await fetch(env.SHEET_URL);
   const rows = await res.json();
@@ -722,8 +770,12 @@ async function getAnalytics(env, days, type) {
     return { labels: [], values: [] };
   }
 
+  const transactions = rows.slice(1);
+  // Ищем пары во всей истории, даже если вторая запись вне выбранного периода.
+  const legacyTransfers = findLegacyTransferRows(transactions);
   const now = Date.now();
-  const filtered = rows.slice(1).filter(r => {
+  const filtered = transactions.filter((r, index) => {
+    if (legacyTransfers.has(index)) return false;
     const date = new Date(r[0]).getTime();
     return Number.isFinite(date) && (now - date) <= days * 86400000 && date <= now && (r[1] === type || (type === "expense" && r[1] === "refund"));
   });
